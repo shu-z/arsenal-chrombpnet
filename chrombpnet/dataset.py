@@ -8,7 +8,7 @@ This module provides classes for loading and processing genomic data for trainin
 It handles the loading of genomic regions, their corresponding sequences, and various data augmentation techniques.
 """
 
-from functools import cached_property
+from functools import cached_property, partial
 from time import time
 
 # Third-party imports
@@ -59,6 +59,12 @@ class DataModule(L.LightningDataModule):
             self.dataset_class = ChromBPNetDataset
         else:
             raise ValueError(f'Invalid data type: {self.config.data_type}')
+        # GPN-Star models also need the alignment of each window
+        if getattr(self.config, 'msa_path', None) is not None:
+            self.dataset_class = partial(GPNStarDataset, msa_path=self.config.msa_path)
+        # The phyloP baseline adds conservation as a 5th input channel
+        if getattr(self.config, 'phylop_bw', None) is not None:
+            self.dataset_class = partial(PhyloPDataset, phylop_bw=self.config.phylop_bw)
 
         # Load and process data
         self._load_regions()
@@ -496,4 +502,53 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
             'onehot_seq': self.cur_seqs[idx].astype(np.float32).transpose(),
             'profile': self.cur_cts[idx].astype(np.float32),
         }
+
+    def window(self, idx):
+        """Zero-based half-open (chrom, start, end, strand) of example ``idx``."""
+        chrom, pos, fwd_or_rev, is_peak = self.cur_coords[idx]
+        pos = int(pos)
+        # Peak coords hold the cropped window start; non-peak coords hold the summit.
+        start = pos if str(is_peak) in ('1', 'True') else pos - self.inputlen // 2
+        return chrom, start, start + self.inputlen, '-' if fwd_or_rev == 'r' else '+'
+
+
+class PhyloPDataset(ChromBPNetDataset):
+    """ChromBPNetDataset whose onehot_seq gets per-base phyloP as a 5th row, on the sequence's strand."""
+
+    def __init__(self, *args, phylop_bw=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.phylop_bw = phylop_bw
+        self._bw = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_bw'] = None
+        return state
+
+    def phylop(self, chrom, start, end, strand):
+        # Opened lazily so each DataLoader worker gets its own handle.
+        if self._bw is None:
+            import pyBigWig
+            self._bw = pyBigWig.open(self.phylop_bw)
+        vals = np.nan_to_num(np.array(self._bw.values(chrom, start, end), dtype=np.float32))
+        return vals[::-1].copy() if strand == '-' else vals
+
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        item['onehot_seq'] = np.vstack([item['onehot_seq'], self.phylop(*self.window(idx))[None]])
+        return item
+
+
+class GPNStarDataset(ChromBPNetDataset):
+    """ChromBPNetDataset plus batch['msa'], the (input_len, n_species) alignment on onehot_seq's strand."""
+
+    def __init__(self, *args, msa_path=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        from .gpnstar import MSAReader
+        self.msa = MSAReader(msa_path, chroms=list(self.regions['chr'].unique()))
+
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        item['msa'] = self.msa.get(*self.window(idx))
+        return item
 

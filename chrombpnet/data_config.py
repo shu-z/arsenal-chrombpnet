@@ -73,6 +73,8 @@ class DataConfig:
 			batch_size: int = 64,
 			num_workers: int = 32,
 			debug: bool = False,
+			msa_path: str = None,
+			phylop_bw: str = None,
 			**kwargs,
 		):
 
@@ -101,6 +103,8 @@ class DataConfig:
 			self.batch_size = batch_size    
 			self.num_workers = num_workers
 			self.debug = debug
+			self.msa_path = msa_path  # GPN-Star MSA directory, e.g. .../cactus447way/447
+			self.phylop_bw = phylop_bw  # per-base conservation bigwig for the phyloP baseline
 
 			fold_file_path = _datasets.fetch(f'fold_{fold}.json', progressbar=False)
 			splits_dict = json.load(open(fold_file_path))

@@ -18,7 +18,9 @@ import numpy as np
 import argparse
 from torch.distributions.multinomial import Multinomial
 from .chrombpnet import BPNet, ChromBPNet, ArsenalChromBPNet, ArsenalChromBPNetNoBias
-from .model_config import ChromBPNetConfig, ArsenalChromBPNetConfig
+from .model_config import ChromBPNetConfig, ArsenalChromBPNetConfig, GPNStarChromBPNetConfig
+from .gpnstar import GPNStarChromBPNet, GPNStarChromBPNetNoBias
+from .phylop import PhyloPChromBPNet
 import os
 import sys
 arsenal_dir = os.environ.get("ARSENAL_MODEL_DIR", "")
@@ -172,9 +174,17 @@ def init_chrombpnet_wo_bias(chrombpnet_wo_bias, freeze=True):
 
 	return model
 
+def init_gpnstar_wo_bias(model_path, freeze=True):
+	print(f"Loading gpnstar_wo_bias model from {model_path}")
+	model = GPNStarChromBPNetNoBiasWrapper.load_from_checkpoint(model_path, weights_only=False)
+	if freeze:
+		for param in model.parameters():
+			param.requires_grad = False
+	return model
+
 def init_arsenal_wo_bias(model_path, freeze=True):
 	print(f"Loading arsenal_wo_bias model from {model_path}")
-	model = ArsenalChromBPNetNoBiasWrapper.load_from_checkpoint(model_path)
+	model = ArsenalChromBPNetNoBiasWrapper.load_from_checkpoint(model_path, weights_only=False)
 	
 	if freeze:
 		for param in model.parameters():
@@ -717,6 +727,84 @@ class ArsenalChromBPNetNoBiasWrapper(ArsenalChromBPNetWrapper):
 		arsenal_model = torch.load(args.arsenal_model, weights_only=False)
 		self.model = ArsenalChromBPNetNoBias(config, arsenal_model)
 
+class GPNStarChromBPNetWrapper(BPNetWrapper):
+	"""Mirrors ArsenalChromBPNetWrapper's embedding mode; batches also need 'msa'."""
+
+	def __init__(
+		self,
+		args,
+	):
+		super().__init__(args)
+
+		config = GPNStarChromBPNetConfig.from_argparse_args(args)
+		self.model = GPNStarChromBPNet(config)
+
+	def configure_optimizers(self):
+		# Same as ARSENAL's embedding mode
+		optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, eps=1e-7)
+		return optimizer
+
+	def _step(self, batch, batch_idx, mode='train'):
+		if (mode != "train") or (not self.model.finetune):
+			self.model.gpnstar_model.eval()
+		x = batch['onehot_seq'] # batch_size x 4 x seq_length
+		msa = batch['msa'] # batch_size x seq_length x species
+		true_profile = batch['profile'] # batch_size x seq_length
+		true_counts = torch.log1p(true_profile.sum(dim=-1))
+
+		y_profile, y_count = self(x, msa=msa)
+		y_count = y_count.squeeze(-1) # batch_size x 1
+
+		if mode == 'predict':
+			return {
+				'pred_count': _to_numpy(y_count),
+				'true_count': _to_numpy(true_counts),
+				'pred_profile': _to_numpy(y_profile), #.softmax(-1)),
+				'true_profile': _to_numpy(true_profile),
+			}
+
+		self.metrics[mode]['preds'].append(y_count)
+		self.metrics[mode]['targets'].append(true_counts)
+		with torch.no_grad():
+			profile_pearson = pearson_corr(y_profile.softmax(-1), true_profile).mean()
+			self.log_dict({f"{mode}_profile_pearson": profile_pearson}, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+		profile_loss = multinomial_nll(y_profile, true_profile)
+		count_loss = F.mse_loss(y_count, true_counts)
+		loss = self.beta * profile_loss + self.alpha * count_loss
+
+		dict_show = {
+			f'{mode}_loss': loss,
+			f'{mode}_profile_loss': profile_loss,
+			f'{mode}_count_loss': count_loss,
+		}
+
+		self.log_dict(dict_show, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+
+		return loss
+
+class PhyloPChromBPNetWrapper(ChromBPNetWrapper):
+	"""ChromBPNet (same loss and lr) whose onehot_seq carries phyloP as a 5th row; see PhyloPDataset."""
+
+	def __init__(
+		self,
+		args,
+	):
+		super().__init__(args)
+
+		config = ChromBPNetConfig.from_argparse_args(args)
+		self.model = PhyloPChromBPNet(config)
+
+class GPNStarChromBPNetNoBiasWrapper(GPNStarChromBPNetWrapper):
+	def __init__(
+		self,
+		args,
+	):
+		super().__init__(args)
+
+		config = GPNStarChromBPNetConfig.from_argparse_args(args)
+		self.model = GPNStarChromBPNetNoBias(config)
+
 
 def create_model_wrapper(
 	args,
@@ -752,6 +840,18 @@ def create_model_wrapper(
 		if args.chrombpnet_wo_bias:
 			model_wrapper.model.model = model_wrapper.init_chrombpnet_wo_bias(args.chrombpnet_wo_bias, freeze=False)
 		return model_wrapper
+	elif model_type == 'gpnstar-chrombpnet':
+		model_wrapper = GPNStarChromBPNetWrapper(args)
+		if args.bias_scaled:
+			model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
+		return model_wrapper
+	elif model_type == 'phylop-chrombpnet':
+		if not getattr(args, 'phylop_bw', None):
+			raise ValueError("phylop-chrombpnet needs --phylop_bw")
+		model_wrapper = PhyloPChromBPNetWrapper(args)
+		if args.bias_scaled:
+			model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
+		return model_wrapper
 
 	else:
 		raise ValueError(f"Unknown model type: {model_type}") 
@@ -759,12 +859,16 @@ def create_model_wrapper(
 
 def load_pretrained_model(args, checkpoint):
 	import os
-	wrapper_class = ArsenalChromBPNetWrapper if args.model_type == "arsenal-chrombpnet" else ChromBPNetWrapper
+	wrapper_class = {
+		"arsenal-chrombpnet": ArsenalChromBPNetWrapper,
+		"gpnstar-chrombpnet": GPNStarChromBPNetWrapper,
+		"phylop-chrombpnet": PhyloPChromBPNetWrapper,
+	}.get(args.model_type, ChromBPNetWrapper)
 	if args.bias_scaled is None and os.path.exists(os.path.join(args.data_dir, 'bias_scaled.h5')):
 		args.bias_scaled = os.path.join(args.data_dir, 'bias_scaled.h5')
 	if checkpoint is not None:
 		if checkpoint.endswith('.ckpt'):
-			model_wrapper = wrapper_class.load_from_checkpoint(checkpoint, map_location='cpu')
+			model_wrapper = wrapper_class.load_from_checkpoint(checkpoint, map_location='cpu', weights_only=False)
 			if args.bias_scaled:
 				model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
 			else:

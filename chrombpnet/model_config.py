@@ -134,3 +134,49 @@ class ArsenalChromBPNetConfig(BaseConfig):
         self.arsenal_input_size = arsenal_input_size
         self.num_layers_avg = num_layers_avg
         self.category = category
+
+class GPNStarChromBPNetConfig(BaseConfig):
+    """ChromBPNet on frozen GPN-Star embeddings; argument names match ARSENAL's where shared."""
+
+    model_type = "gpnstar-chrombpnet"
+
+    def __init__(
+        self,
+        input_len:int=2114,
+        out_dim:int=1000,
+        n_filters:int=512,
+        n_layers:int=8,
+        conv1_kernel_size:int=21,
+        profile_kernel_size:int=75,
+        n_outputs:int=1,
+        n_control_tracks:int=0,
+        profile_output_bias:int=True,
+        count_output_bias:int=True,
+        input_embedding_dim: int = 512,
+        num_layers_avg: int = 4,
+        gpnstar_model: str = "songlab/gpn-star-hg38-m447-25m",
+        gpnstar_revision: str = None,
+        gpnstar_input_size: int = 256,
+        gpnstar_chunk_batch_size: int = 256,
+        finetune_gpnstar: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.input_len = input_len
+        self.out_dim = out_dim
+        self.n_filters = n_filters
+        self.n_layers = n_layers
+        self.conv1_kernel_size = conv1_kernel_size
+        self.profile_kernel_size = profile_kernel_size
+        self.n_outputs = n_outputs
+        self.n_control_tracks = n_control_tracks
+        self.profile_output_bias = profile_output_bias
+        self.count_output_bias = count_output_bias
+        self.input_embedding_dim = input_embedding_dim
+        self.num_layers_avg = num_layers_avg
+        self.gpnstar_model = gpnstar_model
+        self.gpnstar_revision = gpnstar_revision
+        self.gpnstar_input_size = gpnstar_input_size
+        self.gpnstar_chunk_batch_size = gpnstar_chunk_batch_size
+        self.finetune_gpnstar = finetune_gpnstar

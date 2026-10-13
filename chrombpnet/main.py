@@ -90,10 +90,24 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                             help='Maximum number of training epochs')
     parser.add_argument('--gradient_clip', type=float, default=None,
                             help='Gradient clipping value')
+    parser.add_argument('--matmul_precision', type=str, default='highest', choices=['highest', 'high', 'medium'],
+                            help="torch fp32 matmul precision; 'high' uses TF32 on Ampere+ GPUs")
     parser.add_argument('--force', action='store_true', default=False,
                             help='Force training even if model already exists')
     parser.add_argument('--arsenal_model', type=str, default=None,
                         help="ARSENAL model path")
+    # GPN-Star (--model_type gpnstar-chrombpnet); also needs --msa_path.
+    # --input_embedding_dim and --num_layers_avg are shared with ARSENAL.
+    parser.add_argument('--gpnstar_model', type=str, default="songlab/gpn-star-hg38-m447-25m",
+                        help="GPN-Star Hugging Face repo or local path")
+    parser.add_argument('--gpnstar_revision', type=str, default=None,
+                        help="GPN-Star model revision (commit) to pin")
+    parser.add_argument('--gpnstar_input_size', type=int, default=256,
+                        help="Chunk size at which to feed input to GPN-Star")
+    parser.add_argument('--gpnstar_chunk_batch_size', type=int, default=256,
+                        help="Chunks per GPN-Star forward pass (memory knob)")
+    parser.add_argument('--finetune_gpnstar', action='store_true', default=False,
+                        help="Whether to finetune GPN-Star along with ChromBPNet")
     # parser.add_argument('--input_embedding_dim', type=int, default=512,
     #                     help="Input dimension to ChromBPNet model (ie. ARSENAL output)")
     # parser.add_argument('--arsenal_output_type', type=str, default="embedding", choices=["embedding", "likelihood"],
@@ -388,6 +402,7 @@ def reproduce(args):
 def main():
     parser = get_parser()
     args = parser.parse_args()
+    torch.set_float32_matmul_precision(args.matmul_precision)
 
     if args.command == 'train':
         train(args)
