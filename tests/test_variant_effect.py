@@ -130,3 +130,23 @@ def test_gpnstar_shortcut_matches_full_recompute(genome, embedder, strand):
 	assert torch.allclose(e2, full, atol=1e-5)
 	changed = (e1 != e2).any(-1).any(0).nonzero().flatten()
 	assert len(changed) and 929 <= changed.min() and changed.max() < 1185
+
+
+def test_distill_tokens_alleles_land_on_variant(genome):
+	from chrombpnet.distill import tokenize, rc_tokens
+	path, seq = genome
+	v = _variants(seq)
+	item = VariantInputs(v, 'distill-chrombpnet', path, context=4096)[0]
+	# The embedder keeps the central INPUT_LEN tokens, so the variant must sit at FLANK (+) or INPUT_LEN - 1 - FLANK (-).
+	off = (4096 - INPUT_LEN) // 2
+	for strand, idx in (('+', FLANK), ('-', INPUT_LEN - 1 - FLANK)):
+		t1, t2 = item[strand]
+		assert t1.shape == (2, 4096)
+		for i, (a1, a2) in enumerate(zip(v['allele1'], v['allele2'])):
+			c1, c2 = t1[i, off:off + INPUT_LEN], t2[i, off:off + INPUT_LEN]
+			want1, want2 = (tokenize(a1)[0], tokenize(a2)[0]) if strand == '+' else (tokenize(COMP[a1])[0], tokenize(COMP[a2])[0])
+			assert c1[idx] == want1 and c2[idx] == want2
+			assert (t1[i] != t2[i]).nonzero()[0].tolist() == [off + idx]
+	start = v['pos'][0] - 1 - FLANK
+	assert np.array_equal(item['+'][0][0, off:off + INPUT_LEN], tokenize(seq[start:start + INPUT_LEN]))
+	assert np.array_equal(item['-'][0][0, off:off + INPUT_LEN], rc_tokens(tokenize(seq[start:start + INPUT_LEN])))

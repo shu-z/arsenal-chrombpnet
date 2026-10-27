@@ -18,9 +18,10 @@ import numpy as np
 import argparse
 from torch.distributions.multinomial import Multinomial
 from .chrombpnet import BPNet, ChromBPNet, ArsenalChromBPNet, ArsenalChromBPNetNoBias
-from .model_config import ChromBPNetConfig, ArsenalChromBPNetConfig, GPNStarChromBPNetConfig
+from .model_config import ChromBPNetConfig, ArsenalChromBPNetConfig, GPNStarChromBPNetConfig, DistillChromBPNetConfig
 from .gpnstar import GPNStarChromBPNet, GPNStarChromBPNetNoBias
 from .phylop import PhyloPChromBPNet
+from .distill import DistillChromBPNet, DistillChromBPNetNoBias
 import os
 import sys
 arsenal_dir = os.environ.get("ARSENAL_MODEL_DIR", "")
@@ -783,6 +784,55 @@ class GPNStarChromBPNetWrapper(BPNetWrapper):
 
 		return loss
 
+class DistillChromBPNetWrapper(BPNetWrapper):
+	"""Same loss and optimizer as GPNStarChromBPNetWrapper, on a frozen distilled model; batches need 'tokens'."""
+
+	def __init__(
+		self,
+		args,
+	):
+		super().__init__(args)
+		config = DistillChromBPNetConfig.from_argparse_args(args)
+		self.model = DistillChromBPNet(config)
+
+	def configure_optimizers(self):
+		return torch.optim.Adam(self.model.parameters(), lr=0.0001, eps=1e-7)
+
+	def _step(self, batch, batch_idx, mode='train'):
+		self.model.distill_model.eval()
+		x = batch['onehot_seq'] # batch_size x 4 x seq_length
+		tokens = batch['tokens'] # batch_size x context
+		true_profile = batch['profile'] # batch_size x seq_length
+		true_counts = torch.log1p(true_profile.sum(dim=-1))
+
+		y_profile, y_count = self(x, tokens=tokens)
+		y_count = y_count.squeeze(-1) # batch_size x 1
+
+		if mode == 'predict':
+			return {
+				'pred_count': _to_numpy(y_count),
+				'true_count': _to_numpy(true_counts),
+				'pred_profile': _to_numpy(y_profile),
+				'true_profile': _to_numpy(true_profile),
+			}
+
+		self.metrics[mode]['preds'].append(y_count)
+		self.metrics[mode]['targets'].append(true_counts)
+		with torch.no_grad():
+			profile_pearson = pearson_corr(y_profile.softmax(-1), true_profile).mean()
+			self.log_dict({f"{mode}_profile_pearson": profile_pearson}, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+		profile_loss = multinomial_nll(y_profile, true_profile)
+		count_loss = F.mse_loss(y_count, true_counts)
+		loss = self.beta * profile_loss + self.alpha * count_loss
+		self.log_dict({
+			f'{mode}_loss': loss,
+			f'{mode}_profile_loss': profile_loss,
+			f'{mode}_count_loss': count_loss,
+		}, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+		return loss
+
+
 class PhyloPChromBPNetWrapper(ChromBPNetWrapper):
 	"""ChromBPNet (same loss and lr) whose onehot_seq carries phyloP as a 5th row; see PhyloPDataset."""
 
@@ -845,6 +895,13 @@ def create_model_wrapper(
 		if args.bias_scaled:
 			model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
 		return model_wrapper
+	elif model_type == 'distill-chrombpnet':
+		if not getattr(args, 'distill_model', None) or not getattr(args, 'distill_context', None):
+			raise ValueError("distill-chrombpnet needs --distill_model and --distill_context")
+		model_wrapper = DistillChromBPNetWrapper(args)
+		if args.bias_scaled:
+			model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
+		return model_wrapper
 	elif model_type == 'phylop-chrombpnet':
 		if not getattr(args, 'phylop_bw', None):
 			raise ValueError("phylop-chrombpnet needs --phylop_bw")
@@ -863,6 +920,7 @@ def load_pretrained_model(args, checkpoint):
 		"arsenal-chrombpnet": ArsenalChromBPNetWrapper,
 		"gpnstar-chrombpnet": GPNStarChromBPNetWrapper,
 		"phylop-chrombpnet": PhyloPChromBPNetWrapper,
+		"distill-chrombpnet": DistillChromBPNetWrapper,
 	}.get(args.model_type, ChromBPNetWrapper)
 	if args.bias_scaled is None and os.path.exists(os.path.join(args.data_dir, 'bias_scaled.h5')):
 		args.bias_scaled = os.path.join(args.data_dir, 'bias_scaled.h5')

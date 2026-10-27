@@ -96,6 +96,21 @@ def test_last_layers_average(embedder):
 	torch.testing.assert_close(got, torch.stack(hs[-4:]).mean(0)[:, :, 0])
 
 
+def test_single_layer(embedder):
+	msa = _random_msa(1, 256).long()
+	with torch.no_grad():
+		hs = embedder.model(
+			input_ids=msa[:, :, :1], source_ids=msa,
+			target_species=torch.zeros(1, 1, dtype=torch.long), output_hidden_states=True,
+		).hidden_states
+		embedder.layer = 2
+		try:
+			got = embedder.embed_chunks(msa)
+		finally:
+			embedder.layer = None
+	torch.testing.assert_close(got, hs[2][:, :, 0])
+
+
 @pytest.mark.parametrize("name", list(MODELS))
 def test_train_step_updates_only_chrombpnet(name):
 	from chrombpnet.model_wrappers import GPNStarChromBPNetWrapper

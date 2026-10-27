@@ -1,4 +1,4 @@
-"""No-bias variant scores (log2 allele2/allele1 counts) for ChromBPNet, phyloP and GPN-Star checkpoints."""
+"""No-bias variant scores (log2 allele2/allele1 counts) for ChromBPNet, phyloP, GPN-Star and distilled GPN-Star checkpoints."""
 
 import argparse
 import os
@@ -13,7 +13,7 @@ from .model_wrappers import load_pretrained_model
 
 INPUT_LEN = 2114
 FLANK = INPUT_LEN // 2
-MODEL_TYPES = ['chrombpnet', 'phylop-chrombpnet', 'gpnstar-chrombpnet']
+MODEL_TYPES = ['chrombpnet', 'phylop-chrombpnet', 'gpnstar-chrombpnet', 'distill-chrombpnet']
 
 
 def read_variants(path, chrom_sizes):
@@ -42,11 +42,13 @@ def jsd(p, q):
 class VariantInputs(torch.utils.data.Dataset):
 	"""Item i is batch i's (allele1, allele2) model inputs per strand, as numpy; file handles open lazily per worker."""
 
-	def __init__(self, variants, model_type, fasta, batch_size=64, strands=('+', '-'), msa_path=None, phylop_bw=None):
+	def __init__(self, variants, model_type, fasta, batch_size=64, strands=('+', '-'), msa_path=None, phylop_bw=None, mask_species=False, context=4096):
 		if model_type not in MODEL_TYPES:
 			raise ValueError(f"model_type must be one of {MODEL_TYPES}, got {model_type}")
 		self.variants, self.model_type, self.batch_size, self.strands = variants, model_type, batch_size, strands
 		self.fasta_path, self.msa_path, self.phylop_bw = fasta, msa_path, phylop_bw
+		self.mask_species = mask_species
+		self.context = context
 		self._handles = None
 
 	def __len__(self):
@@ -91,6 +93,9 @@ class VariantInputs(torch.utils.data.Dataset):
 		idx = FLANK if strand == '+' else INPUT_LEN - 1 - FLANK
 		reader = self.handles()['msa']
 		ref = np.stack([reader.get(c, *self.window(p), strand) for c, p in zip(batch['chr'], batch['pos'])])
+		if self.mask_species:
+			# Every non-human species becomes a gap at the variant column, for both alleles.
+			ref[:, idx, 1:] = table[ord('-')]
 		out = []
 		for col in ('allele1', 'allele2'):
 			msa = ref.copy()
@@ -98,10 +103,27 @@ class VariantInputs(torch.utils.data.Dataset):
 			out.append(msa)
 		return out
 
+	def tokens(self, batch, strand):
+		"""(allele1, allele2) distilled-model tokens, each (n, context), centered on the variant and on the given strand."""
+		from .distill import tokenize, rc_tokens
+		fasta = self.handles()['fasta']
+		out = ([], [])
+		for c, p, a1, a2 in zip(batch['chr'], batch['pos'], batch['allele1'], batch['allele2']):
+			lo = p - 1 - self.context // 2
+			size = len(fasta[c])
+			seq = 'N' * max(0, -lo) + fasta[c][max(lo, 0):min(lo + self.context, size)].seq + 'N' * max(0, lo + self.context - size)
+			for k, a in enumerate((a1, a2)):
+				# The variant sits at context // 2, which the center crop maps to FLANK like the other model types.
+				tok = tokenize(seq[:self.context // 2] + a + seq[self.context // 2 + 1:])
+				out[k].append(rc_tokens(tok) if strand == '-' else tok)
+		return [np.stack(t) for t in out]
+
 	def __getitem__(self, i):
 		batch = self.variants.iloc[i * self.batch_size:(i + 1) * self.batch_size]
 		if self.model_type == 'gpnstar-chrombpnet':
 			return {s: self.msas(batch, s) for s in self.strands}
+		if self.model_type == 'distill-chrombpnet':
+			return {s: self.tokens(batch, s) for s in self.strands}
 		x1, x2 = self.onehots(batch)
 		if self.model_type == 'phylop-chrombpnet':
 			bw = self.handles()['phylop']
@@ -141,6 +163,8 @@ class VariantScorer:
 		x1, x2 = (torch.as_tensor(x).to(self.device) for x in inputs)
 		if self.model_type == 'gpnstar-chrombpnet':
 			x1, x2 = self.gpnstar_embeddings(x1, x2, strand)
+		elif self.model_type == 'distill-chrombpnet':
+			x1, x2 = self.net.distill_model(x1), self.net.distill_model(x2)
 		elif self.model_type == 'phylop-chrombpnet':
 			# BPNet transposes any input whose dim 1 is not 4, so pass (n, L, 5).
 			x1, x2 = x1.transpose(1, 2), x2.transpose(1, 2)
@@ -184,6 +208,9 @@ def main():
 	parser.add_argument('--batch_size', type=int, default=64)
 	parser.add_argument('--num_workers', type=int, default=0)
 	parser.add_argument('--forward_only', action='store_true')
+	parser.add_argument('--mask_species', action='store_true', help='GPN-Star: gap out all non-human species at the variant site')
+	parser.add_argument('--distill_attn', choices=['auto', 'flash', 'sdpa'], help="Distilled GPN-Star attention backend; defaults to the run's training value")
+	parser.add_argument('--chunk_batch_size', type=int, help="GPN-Star chunks per forward; defaults to the run's training value")
 	parser.add_argument('--matmul_precision', default='highest', choices=['highest', 'high', 'medium'])
 	args = parser.parse_args()
 	if len(args.out) != len(args.variants):
@@ -192,6 +219,10 @@ def main():
 
 	wrapper = load_pretrained_model(argparse.Namespace(model_type=args.model_type, bias_scaled=None, data_dir=''), args.checkpoint)
 	train_args = getattr(wrapper.hparams, 'args', argparse.Namespace())
+	if args.chunk_batch_size:
+		wrapper.model.gpnstar_model.chunk_batch_size = args.chunk_batch_size
+	if args.distill_attn:
+		wrapper.model.distill_model.attn_impl = args.distill_attn
 	scorer = VariantScorer(wrapper, args.model_type, device='cuda' if torch.cuda.is_available() else 'cpu')
 	sizes = pd.read_csv(args.chrom_sizes, sep='\t', header=None, index_col=0)[1].to_dict()
 	for variants_path, out_path in zip(args.variants, args.out):
@@ -200,6 +231,8 @@ def main():
 			strands=('+',) if args.forward_only else ('+', '-'),
 			msa_path=args.msa_path or getattr(train_args, 'msa_path', None),
 			phylop_bw=args.phylop_bw or getattr(train_args, 'phylop_bw', None),
+			mask_species=args.mask_species,
+			context=getattr(train_args, 'distill_context', None) or 4096,
 		)
 		scores = scorer.score(dataset, args.num_workers)
 		os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)

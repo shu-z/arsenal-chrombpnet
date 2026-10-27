@@ -135,6 +135,51 @@ class ArsenalChromBPNetConfig(BaseConfig):
         self.num_layers_avg = num_layers_avg
         self.category = category
 
+class DistillChromBPNetConfig(BaseConfig):
+    """ChromBPNet on frozen distilled GPN-Star (sequence-only) features."""
+
+    model_type = "distill-chrombpnet"
+
+    def __init__(
+        self,
+        input_len:int=2114,
+        out_dim:int=1000,
+        n_filters:int=512,
+        n_layers:int=8,
+        conv1_kernel_size:int=21,
+        profile_kernel_size:int=75,
+        n_outputs:int=1,
+        n_control_tracks:int=0,
+        profile_output_bias:int=True,
+        count_output_bias:int=True,
+        input_embedding_dim: int = 1024,
+        num_layers_avg: int = 1,
+        distill_model: str = None,
+        distill_representation: str = "shared",
+        distill_context: int = 4096,
+        distill_attn: str = "auto",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.input_len = input_len
+        self.out_dim = out_dim
+        self.n_filters = n_filters
+        self.n_layers = n_layers
+        self.conv1_kernel_size = conv1_kernel_size
+        self.profile_kernel_size = profile_kernel_size
+        self.n_outputs = n_outputs
+        self.n_control_tracks = n_control_tracks
+        self.profile_output_bias = profile_output_bias
+        self.count_output_bias = count_output_bias
+        self.input_embedding_dim = input_embedding_dim
+        self.num_layers_avg = num_layers_avg
+        self.distill_model = distill_model
+        self.distill_representation = distill_representation
+        self.distill_context = distill_context
+        self.distill_attn = distill_attn
+
+
 class GPNStarChromBPNetConfig(BaseConfig):
     """ChromBPNet on frozen GPN-Star embeddings; argument names match ARSENAL's where shared."""
 
@@ -158,6 +203,7 @@ class GPNStarChromBPNetConfig(BaseConfig):
         gpnstar_revision: str = None,
         gpnstar_input_size: int = 256,
         gpnstar_chunk_batch_size: int = 256,
+        gpnstar_layer: int = None,
         finetune_gpnstar: bool = False,
         **kwargs,
     ):
@@ -179,4 +225,5 @@ class GPNStarChromBPNetConfig(BaseConfig):
         self.gpnstar_revision = gpnstar_revision
         self.gpnstar_input_size = gpnstar_input_size
         self.gpnstar_chunk_batch_size = gpnstar_chunk_batch_size
+        self.gpnstar_layer = gpnstar_layer
         self.finetune_gpnstar = finetune_gpnstar

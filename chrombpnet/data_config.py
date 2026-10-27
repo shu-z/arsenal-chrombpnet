@@ -75,6 +75,7 @@ class DataConfig:
 			debug: bool = False,
 			msa_path: str = None,
 			phylop_bw: str = None,
+			distill_context: int = None,
 			**kwargs,
 		):
 
@@ -105,6 +106,7 @@ class DataConfig:
 			self.debug = debug
 			self.msa_path = msa_path  # GPN-Star MSA directory, e.g. .../cactus447way/447
 			self.phylop_bw = phylop_bw  # per-base conservation bigwig for the phyloP baseline
+			self.distill_context = distill_context  # token window for distilled GPN-Star models, e.g. 4096
 
 			fold_file_path = _datasets.fetch(f'fold_{fold}.json', progressbar=False)
 			splits_dict = json.load(open(fold_file_path))

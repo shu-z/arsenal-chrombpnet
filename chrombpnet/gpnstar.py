@@ -51,6 +51,7 @@ class GPNStarEmbedder(nn.Module):
 		chunk_size=256,
 		num_layers_avg=4,
 		chunk_batch_size=256,
+		layer=None,
 	):
 		super().__init__()
 		register_auto_classes()
@@ -58,16 +59,20 @@ class GPNStarEmbedder(nn.Module):
 		self.chunk_size = chunk_size
 		self.num_layers_avg = num_layers_avg
 		self.chunk_batch_size = chunk_batch_size
+		# A single block's output (1 = first block) replaces the last-num_layers_avg average when set.
+		self.layer = layer
 		n_layers = self.model.config.num_hidden_layers
 		if not 1 <= num_layers_avg <= n_layers:
 			raise ValueError(f"num_layers_avg must be in [1, {n_layers}], got {num_layers_avg}")
+		if layer is not None and not 1 <= layer <= n_layers:
+			raise ValueError(f"layer must be in [1, {n_layers}], got {layer}")
 
 	@property
 	def hidden_size(self):
 		return self.model.config.hidden_size
 
 	def embed_chunks(self, msa):
-		"""(n, chunk, species) tokens -> (n, chunk, hidden) mean of the last num_layers_avg layers."""
+		"""(n, chunk, species) tokens -> (n, chunk, hidden) from one block or the mean of the last num_layers_avg."""
 		msa = msa.long()
 		out = self.model(
 			input_ids=msa[:, :, :1],
@@ -76,6 +81,8 @@ class GPNStarEmbedder(nn.Module):
 			output_hidden_states=True,
 		)
 		# hidden_states[0] is the embedding; [k] is block k's output.
+		if self.layer is not None:
+			return out.hidden_states[self.layer][:, :, 0]
 		layers = out.hidden_states[-self.num_layers_avg:]
 		return (sum(layers) / len(layers))[:, :, 0]
 
@@ -110,6 +117,8 @@ class GPNStarChromBPNet(nn.Module):
 			chunk_size=config.gpnstar_input_size,
 			num_layers_avg=config.num_layers_avg,
 			chunk_batch_size=config.gpnstar_chunk_batch_size,
+			# Checkpoints saved before this option existed have no gpnstar_layer.
+			layer=getattr(config, 'gpnstar_layer', None),
 		)
 		if config.input_embedding_dim != self.gpnstar_model.hidden_size:
 			raise ValueError(

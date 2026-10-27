@@ -65,6 +65,9 @@ class DataModule(L.LightningDataModule):
         # The phyloP baseline adds conservation as a 5th input channel
         if getattr(self.config, 'phylop_bw', None) is not None:
             self.dataset_class = partial(PhyloPDataset, phylop_bw=self.config.phylop_bw)
+        # Distilled GPN-Star models read a longer token window around each example's center
+        if getattr(self.config, 'distill_context', None) is not None:
+            self.dataset_class = partial(DistillDataset, context=self.config.distill_context)
 
         # Load and process data
         self._load_regions()
@@ -536,6 +539,39 @@ class PhyloPDataset(ChromBPNetDataset):
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
         item['onehot_seq'] = np.vstack([item['onehot_seq'], self.phylop(*self.window(idx))[None]])
+        return item
+
+
+class DistillDataset(ChromBPNetDataset):
+    """ChromBPNetDataset plus batch['tokens'], `context` bp centered on onehot_seq's window and on its strand."""
+
+    def __init__(self, *args, context=4096, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.context = context
+        self._fasta = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_fasta'] = None
+        return state
+
+    def tokens(self, chrom, start, end, strand):
+        """Tokens for `context` bp around the center of [start, end), N past the chromosome ends."""
+        from .distill import tokenize, rc_tokens
+        # Opened lazily so each DataLoader worker gets its own handle.
+        if self._fasta is None:
+            import pyfaidx
+            self._fasta = pyfaidx.Fasta(self.genome_fasta)
+        center = (start + end) // 2
+        lo, hi = center - self.context // 2, center - self.context // 2 + self.context
+        size = len(self._fasta[chrom])
+        seq = 'N' * max(0, -lo) + self._fasta[chrom][max(lo, 0):min(hi, size)].seq + 'N' * max(0, hi - size)
+        tok = tokenize(seq)
+        return rc_tokens(tok) if strand == '-' else tok
+
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        item['tokens'] = self.tokens(*self.window(idx))
         return item
 
 

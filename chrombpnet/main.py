@@ -92,6 +92,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                             help='Gradient clipping value')
     parser.add_argument('--matmul_precision', type=str, default='highest', choices=['highest', 'high', 'medium'],
                             help="torch fp32 matmul precision; 'high' uses TF32 on Ampere+ GPUs")
+    parser.add_argument('--seed', type=int, default=1234,
+                            help='Random seed for initialization and data sampling')
     parser.add_argument('--force', action='store_true', default=False,
                             help='Force training even if model already exists')
     parser.add_argument('--arsenal_model', type=str, default=None,
@@ -106,6 +108,15 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                         help="Chunk size at which to feed input to GPN-Star")
     parser.add_argument('--gpnstar_chunk_batch_size', type=int, default=256,
                         help="Chunks per GPN-Star forward pass (memory knob)")
+    parser.add_argument('--gpnstar_layer', type=int, default=None,
+                        help="Use only this GPN-Star block's output (1 = first block) instead of averaging the last --num_layers_avg")
+    # Distilled GPN-Star (--model_type distill-chrombpnet); --num_layers_avg picks the last N layers.
+    parser.add_argument('--distill_model', type=str, default=None,
+                        help="Local gpn-star-distill model directory (config.json + model.safetensors)")
+    parser.add_argument('--distill_representation', type=str, default='shared', choices=['shared', 'm447', 'v100'],
+                        help="'shared' = fixed RMSNorm per layer; m447/v100 add that head's learned gains (final layer only)")
+    parser.add_argument('--distill_attn', type=str, default='auto', choices=['auto', 'flash', 'sdpa'],
+                        help="Attention backend; auto uses flash-attn on CUDA when installed")
     parser.add_argument('--finetune_gpnstar', action='store_true', default=False,
                         help="Whether to finetune GPN-Star along with ChromBPNet")
     # parser.add_argument('--input_embedding_dim', type=int, default=512,
@@ -402,6 +413,7 @@ def reproduce(args):
 def main():
     parser = get_parser()
     args = parser.parse_args()
+    L.seed_everything(args.seed)
     torch.set_float32_matmul_precision(args.matmul_precision)
 
     if args.command == 'train':
